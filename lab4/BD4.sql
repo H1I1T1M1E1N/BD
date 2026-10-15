@@ -19,9 +19,11 @@ CREATE TABLE department (
     status          VARCHAR(50)     NOT NULL,
 
     CONSTRAINT fk_department_company
-        FOREIGN KEY (company_id) REFERENCES company (company_id),
+        FOREIGN KEY (company_id) REFERENCES company (company_id)
+		ON DELETE RESTRICT,
     CONSTRAINT fk_department_parent
-        FOREIGN KEY (parent_id) REFERENCES department (department_id),
+        FOREIGN KEY (parent_id) REFERENCES department (department_id)
+		ON DELETE SET NULL,
     CONSTRAINT chk_department_status CHECK (status IN ('активно', 'не активно'))
 );
 
@@ -34,7 +36,8 @@ CREATE TABLE recruiter (
     status          VARCHAR(50)     NOT NULL,
 
     CONSTRAINT fk_recruiter_department
-        FOREIGN KEY (department_id) REFERENCES department (department_id),
+        FOREIGN KEY (department_id) REFERENCES department (department_id)
+		ON DELETE RESTRICT,
     CONSTRAINT chk_recruiter_status CHECK (status IN ('активен', 'не активен'))
 );
 
@@ -49,7 +52,8 @@ CREATE TABLE recruiter_authority (
     status          VARCHAR(50)     NOT NULL,
 
     CONSTRAINT fk_authority_recruiter
-        FOREIGN KEY (recruiter_id) REFERENCES recruiter (recruiter_id),
+        FOREIGN KEY (recruiter_id) REFERENCES recruiter (recruiter_id)
+		ON DELETE RESTRICT,
     CONSTRAINT chk_recruiter_authority_status
         CHECK (status IN ('действует', 'истекло', 'отозвано'))
 );
@@ -64,23 +68,25 @@ CREATE TABLE vacancy (
     publish_status  VARCHAR(50)     NOT NULL,
 
     CONSTRAINT fk_vacancy_company
-        FOREIGN KEY (company_id) REFERENCES company (company_id),
+        FOREIGN KEY (company_id) REFERENCES company (company_id)
+		ON DELETE RESTRICT,
     CONSTRAINT fk_vacancy_department
-        FOREIGN KEY (department_id) REFERENCES department (department_id),
+        FOREIGN KEY (department_id) REFERENCES department (department_id)
+		ON DELETE SET NULL,
     CONSTRAINT chk_vacancy_status CHECK (publish_status IN ('активна', 'закрыта'))
 );
 
 -- E6. Версия вакансии
 CREATE TABLE vacancy_version (
     vacancy_version_id  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    vacancy_id          INTEGER     NOT NULL,                               
-    version_number      INTEGER     NOT NULL,                            
+    vacancy_id          INTEGER     NOT NULL,
+    version_number      INTEGER     NOT NULL,
     created_at          TIMESTAMP   NOT NULL DEFAULT NOW(),
     changed_by          VARCHAR(255) NOT NULL,
     change_reason       TEXT,
     status              VARCHAR(50) NOT NULL,
 
-    CONSTRAINT uq_vacancy_version UNIQUE (vacancy_id, version_number),   
+    CONSTRAINT uq_vacancy_version UNIQUE (vacancy_id, version_number),
     CONSTRAINT fk_vacancy_version_vacancy
         FOREIGN KEY (vacancy_id) REFERENCES vacancy (vacancy_id)
         ON DELETE RESTRICT,
@@ -98,7 +104,7 @@ CREATE TABLE skill (
 
 -- E8. Требование навыка
 CREATE TABLE vacancy_skill_requirement (
-    vacancy_version_id  BIGINT      NOT NULL,     
+    vacancy_version_id  BIGINT      NOT NULL,
     skill_id            BIGINT      NOT NULL,
     required_level      INTEGER     NOT NULL,
     is_mandatory        BOOLEAN     NOT NULL,
@@ -110,6 +116,7 @@ CREATE TABLE vacancy_skill_requirement (
         ON DELETE CASCADE,
     CONSTRAINT fk_vsr_skill
         FOREIGN KEY (skill_id) REFERENCES skill (skill_id)
+		ON DELETE RESTRICT
 );
 
 -- E9. Соискатель
@@ -133,31 +140,32 @@ CREATE TABLE resume (
     status          VARCHAR(50)     NOT NULL,
 
     CONSTRAINT fk_resume_applicant
-        FOREIGN KEY (applicant_id) REFERENCES applicant (applicant_id),
+        FOREIGN KEY (applicant_id) REFERENCES applicant (applicant_id)
+		ON DELETE RESTRICT,
     CONSTRAINT chk_resume_status CHECK (status IN ('опубликовано', 'скрыто'))
 );
 
 -- E11. Версия резюме
 CREATE TABLE resume_version (
-    resume_version_id   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,   -- суррогатный PK
-    resume_id           INTEGER     NOT NULL,                               -- FK на резюме
-    version_number      INTEGER     NOT NULL,                               -- номер версии внутри резюме
+    resume_version_id   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    resume_id           INTEGER     NOT NULL,
+    version_number      INTEGER     NOT NULL,
     created_at          TIMESTAMP   NOT NULL DEFAULT NOW(),
     changed_by          VARCHAR(255) NOT NULL,
     change_reason       TEXT,
     status              VARCHAR(50) NOT NULL,
 
-    CONSTRAINT uq_resume_version UNIQUE (resume_id, version_number),        -- бизнес-ключ
+    CONSTRAINT uq_resume_version UNIQUE (resume_id, version_number),
     CONSTRAINT fk_resume_version_resume
         FOREIGN KEY (resume_id) REFERENCES resume (resume_id)
-        ON DELETE CASCADE,
+        ON DELETE RESTRICT,
     CONSTRAINT chk_resume_version_status
         CHECK (status IN ('текущая', 'устаревшая'))
 );
 
 -- E12. Навык резюме
 CREATE TABLE resume_skill (
-    resume_version_id  BIGINT      NOT NULL,   
+    resume_version_id  BIGINT      NOT NULL,
     skill_id           BIGINT      NOT NULL,
     level              INTEGER     NOT NULL,
     experience         INTEGER     NOT NULL,
@@ -169,24 +177,28 @@ CREATE TABLE resume_skill (
         ON DELETE CASCADE,
     CONSTRAINT fk_resume_skill_skill
         FOREIGN KEY (skill_id) REFERENCES skill (skill_id)
+		ON DELETE RESTRICT
 );
 
 -- E13. Отклик
 CREATE TABLE response (
     response_id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     applicant_id        INTEGER      NOT NULL,
-    resume_version_id   BIGINT       NOT NULL,     
-    vacancy_version_id  BIGINT       NOT NULL,     
+    resume_version_id   BIGINT       NOT NULL,
+    vacancy_version_id  BIGINT       NOT NULL,
     created_at          TIMESTAMP    NOT NULL DEFAULT NOW(),
     current_stage       VARCHAR(100) NOT NULL,
     status              VARCHAR(50)  NOT NULL,
 
     CONSTRAINT fk_response_applicant
-        FOREIGN KEY (applicant_id) REFERENCES applicant (applicant_id),
+        FOREIGN KEY (applicant_id) REFERENCES applicant (applicant_id)
+		ON DELETE RESTRICT,
     CONSTRAINT fk_response_resume_version
-        FOREIGN KEY (resume_version_id) REFERENCES resume_version (resume_version_id),
+        FOREIGN KEY (resume_version_id) REFERENCES resume_version (resume_version_id)
+		ON DELETE RESTRICT,
     CONSTRAINT fk_response_vacancy_version
-        FOREIGN KEY (vacancy_version_id) REFERENCES vacancy_version (vacancy_version_id),
+        FOREIGN KEY (vacancy_version_id) REFERENCES vacancy_version (vacancy_version_id)
+		ON DELETE RESTRICT,
     CONSTRAINT chk_response_status
         CHECK (status IN ('активен', 'завершён')),
     CONSTRAINT chk_response_current_stage
@@ -197,20 +209,21 @@ CREATE TABLE response (
 
 -- E14. Этап отклика
 CREATE TABLE response_stage (
-    stage_id        BIGINT GENERATED ALWAYS AS IDENTITY,  
-    response_id     INTEGER         NOT NULL,             
-    recruiter_id    INTEGER         NOT NULL,              
-    stage_type      VARCHAR(100)    NOT NULL,              
+    stage_id        BIGINT GENERATED ALWAYS AS IDENTITY,
+    response_id     INTEGER         NOT NULL,
+    recruiter_id    INTEGER         NOT NULL,
+    stage_type      VARCHAR(100)    NOT NULL,
     date_from       TIMESTAMP       NOT NULL DEFAULT NOW(),
-    date_to         TIMESTAMP,                             
-    result          TEXT,                                  
+    date_to         TIMESTAMP,
+    result          TEXT,
 
     PRIMARY KEY (stage_id, response_id),
     CONSTRAINT fk_response_stage_response
         FOREIGN KEY (response_id) REFERENCES response (response_id)
-        ON DELETE CASCADE,
+        ON DELETE RESTRICT,
     CONSTRAINT fk_response_stage_recruiter
         FOREIGN KEY (recruiter_id) REFERENCES recruiter (recruiter_id)
+		ON DELETE RESTRICT
 );
 
 -- E15. Интервью
@@ -225,9 +238,11 @@ CREATE TABLE interview (
     status          VARCHAR(50)     NOT NULL,
 
     CONSTRAINT fk_interview_response
-        FOREIGN KEY (response_id) REFERENCES response (response_id),
+        FOREIGN KEY (response_id) REFERENCES response (response_id)
+		ON DELETE RESTRICT,
     CONSTRAINT fk_interview_applicant
         FOREIGN KEY (applicant_id) REFERENCES applicant (applicant_id)
+		ON DELETE RESTRICT
 );
 
 -- E16. Предложение о работе
@@ -242,6 +257,9 @@ CREATE TABLE job_offer (
 
     CONSTRAINT fk_job_offer_response
         FOREIGN KEY (response_id) REFERENCES response (response_id)
+		ON DELETE RESTRICT,
+	CONSTRAINT chk_job_offer_status
+        CHECK (status IN ('отправлено', 'принято', 'отклонено', 'истекло', 'отозвано', 'устаревшее'))
 );
 
 -- E17. Тариф работодателя
@@ -257,6 +275,7 @@ CREATE TABLE employer_tariff (
 
     CONSTRAINT fk_tariff_company
         FOREIGN KEY (company_id) REFERENCES company (company_id)
+		ON DELETE RESTRICT
 );
 
 -- E18. Участник интервью
@@ -266,7 +285,9 @@ CREATE TABLE interview_participant (
 
     PRIMARY KEY (interview_id, recruiter_id),
     CONSTRAINT fk_ip_interview
-        FOREIGN KEY (interview_id) REFERENCES interview (interview_id),
+        FOREIGN KEY (interview_id) REFERENCES interview (interview_id)
+		ON DELETE CASCADE,
     CONSTRAINT fk_ip_recruiter
         FOREIGN KEY (recruiter_id) REFERENCES recruiter (recruiter_id)
+		ON DELETE RESTRICT
 );
