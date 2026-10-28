@@ -16,13 +16,13 @@ DB_CONFIG = {
 fake = Faker('ru_RU')
 
 # ================= КОЛИЧЕСТВО ДАННЫХ =================
-NUM_COMPANIES = 10
-NUM_DEPARTMENTS = 40
-NUM_RECRUITERS = 100
-NUM_VACANCIES = 25
-NUM_SKILLS = 30
-NUM_APPLICANTS = 200
-NUM_RESPONSES = 50
+NUM_COMPANIES = 50
+NUM_DEPARTMENTS = 400
+NUM_RECRUITERS = 4000
+NUM_VACANCIES = 5000
+NUM_SKILLS = 100
+NUM_APPLICANTS = 7000
+NUM_RESPONSES = 20000
 
 # Диапазон количества версий
 MIN_VERSIONS = 1
@@ -69,7 +69,7 @@ def seed_database():
                 VALUES (%s, %s, %s, %s, %s) RETURNING department_id
             """, (
                 random.choice(company_ids),
-                fake.job(),
+                fake.bs(),
                 parent,
                 fake.name(),
                 random.choice(['активно', 'не активно'])
@@ -283,46 +283,62 @@ def seed_database():
         # ================= 10. ОТКЛИКИ =================
         print(f"📨 Создаем {NUM_RESPONSES} откликов...")
         response_ids = []
-
         STAGES = ['получен', 'просмотрен', 'приглашен', 'интервью',
                   'тестовое задание', 'отказ', 'предложение']
+
+        # Генерируем даты откликов за последний год
+        base_date = datetime.now() - timedelta(days=365)
 
         for _ in range(NUM_RESPONSES):
             rvid, aid = random.choice(resume_version_ids)
             vvid = random.choice(vacancy_version_ids)
-
             current_stage = random.choice(STAGES)
             status = 'завершён' if current_stage in ['отказ', 'предложение'] else 'активен'
 
-            resp_id = get_id(cur, """
-                INSERT INTO response (applicant_id, resume_version_id, vacancy_version_id, current_stage, status)
-                VALUES (%s, %s, %s, %s, %s) RETURNING response_id
-            """, (aid, rvid, vvid, current_stage, status))
+            # Случайная дата отклика за последний год
+            created_at = base_date + timedelta(
+                days=random.randint(0, 365),
+                hours=random.randint(0, 23),
+                minutes=random.randint(0, 59)
+            )
 
+            resp_id = get_id(cur, """
+                INSERT INTO response (applicant_id, resume_version_id, vacancy_version_id,
+                                     current_stage, status, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING response_id
+            """, (aid, rvid, vvid, current_stage, status, created_at))
             response_ids.append((resp_id, aid, current_stage))
 
         # ================= 11. ЭТАПЫ ОТКЛИКОВ =================
         print("📊 Создаем этапы откликов...")
         for resp_id, aid, current_stage in response_ids:
+            # Получаем дату создания отклика
+            cur.execute("SELECT created_at FROM response WHERE response_id = %s", (resp_id,))
+            response_created_at = cur.fetchone()[0]
+
             # Создаем 1-5 этапов для каждого отклика
-            num_stages = random.randint(1, 5)
+            num_stages = random.randint(1, 9)
+            stage_date = response_created_at
 
             for _ in range(num_stages):
                 stage_type = random.choice(STAGES)
-                date_from = fake.date_time_between(start_date='-2M', end_date='now')
+                date_from = stage_date + timedelta(hours=random.randint(1, 48))
                 date_to = date_from + timedelta(hours=random.randint(1, 168)) if random.random() < 0.7 else None
 
                 cur.execute("""
-                    INSERT INTO response_stage (response_id, recruiter_id, stage_type, date_from, date_to, result)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (
-                    resp_id,
-                    random.choice(recruiter_ids),
-                    stage_type,
-                    date_from,
-                    date_to,
-                    fake.text(max_nb_chars=80) if random.random() < 0.6 else None
-                ))
+                            INSERT INTO response_stage (response_id, recruiter_id, stage_type, date_from, date_to, result)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            """, (
+                                resp_id,
+                                random.choice(recruiter_ids),
+                                stage_type,
+                                date_from,
+                                date_to,
+                                fake.text(max_nb_chars=80) if random.random() < 0.6 else None
+                            ))
+
+                if date_to:
+                    stage_date = date_to
 
         # ================= 12. ИНТЕРВЬЮ =================
         print("🎤 Создаем интервью...")
