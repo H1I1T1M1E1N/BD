@@ -1,4 +1,5 @@
 import psycopg2
+from psycopg2 import errors
 from faker import Faker
 import random
 from datetime import datetime, timedelta
@@ -14,6 +15,7 @@ DB_CONFIG = {
 }
 
 fake = Faker('ru_RU')
+random.seed(42)  # воспроизводимость
 
 # ================= КОЛИЧЕСТВО ДАННЫХ =================
 NUM_COMPANIES = 50
@@ -24,13 +26,26 @@ NUM_SKILLS = 100
 NUM_APPLICANTS = 7000
 NUM_RESPONSES = 20000
 
-# Диапазон количества версий
 MIN_VERSIONS = 1
 MAX_VERSIONS = 6
 
+# Этапы и допустимые переходы (должны совпадать с stage_transition)
+STAGES = ['получен', 'просмотрен', 'приглашен', 'интервью',
+          'тестовое задание', 'отказ', 'предложение']
+
+TRANSITIONS = {
+    'получен': ['просмотрен'],
+    'просмотрен': ['приглашен', 'отказ'],
+    'приглашен': ['интервью', 'отказ'],
+    'интервью': ['тестовое задание', 'отказ'],
+    'тестовое задание': ['предложение', 'отказ'],
+    'предложение': ['отказ'],
+}
+
+INTERVIEW_STATUSES = ['запланировано', 'завершено', 'отменено']
+
 
 def get_id(cur, query, params):
-    """Выполняет INSERT и возвращает сгенерированный ID"""
     cur.execute(query, params)
     return cur.fetchone()[0]
 
@@ -56,74 +71,96 @@ def seed_database():
             ))
             company_ids.append(cid)
 
+        # ================= 1a. ПЕРЕГОВОРНЫЕ =================
+        print("🚪 Создаем переговорные...")
+        company_rooms = {cid: [] for cid in company_ids}
+        for cid in company_ids:
+            for n in range(random.randint(2, 6)):
+                rid = get_id(cur, """
+                    INSERT INTO meeting_room (name, company_id)
+                    VALUES (%s, %s) RETURNING room_id
+                """, (f"Переговорная {n + 1}", cid))
+                company_rooms[cid].append(rid)
+
         # ================= 2. ПОДРАЗДЕЛЕНИЯ =================
         print(f"🏢 Создаем {NUM_DEPARTMENTS} подразделений...")
         department_ids = []
+        department_company = {}  # department_id -> company_id (нужно для вакансий/рекрутеров)
 
         for _ in range(NUM_DEPARTMENTS):
-            # 30% шанс, что подразделение будет вложенным
             parent = random.choice(department_ids) if department_ids and random.random() < 0.3 else None
+            cid = random.choice(company_ids)
 
             did = get_id(cur, """
                 INSERT INTO department (company_id, name, parent_id, head_full_name, status)
                 VALUES (%s, %s, %s, %s, %s) RETURNING department_id
             """, (
-                random.choice(company_ids),
+                cid,
                 fake.bs(),
                 parent,
                 fake.name(),
                 random.choice(['активно', 'не активно'])
             ))
             department_ids.append(did)
+            department_company[did] = cid
 
         # ================= 3. РЕКРУТЕРЫ =================
-        print(f" 👥 Создаем {NUM_RECRUITERS} рекрутеров...")
+        print(f"👥 Создаем {NUM_RECRUITERS} рекрутеров...")
         recruiter_ids = []
+        recruiter_company = {}  # recruiter_id -> company_id
 
         for _ in range(NUM_RECRUITERS):
+            did = random.choice(department_ids)
             rid = get_id(cur, """
                 INSERT INTO recruiter (full_name, contacts, department_id, status)
                 VALUES (%s, %s, %s, %s) RETURNING recruiter_id
             """, (
                 fake.name(),
                 f"{fake.phone_number()}, {fake.email()}",
-                random.choice(department_ids),
+                did,
                 random.choice(['активен', 'не активен'])
             ))
             recruiter_ids.append(rid)
+            recruiter_company[rid] = department_company[did]
 
         # ================= 4. ПОЛНОМОЧИЯ РЕКРУТЕРОВ =================
+        # object = 'компания:<id>' или 'вакансия:<id>' — как ожидает процедура advance_response_stage
         print("🔐 Создаем полномочия рекрутеров...")
+        today = datetime.now().date()
         for rid in recruiter_ids:
+            cid = recruiter_company[rid]
             num_authorities = random.randint(1, 3)
             for _ in range(num_authorities):
-                date_from = fake.date_object()
-                date_to = date_from + timedelta(days=random.randint(30, 365))
+                # 70% — действующие (вокруг сегодня), 30% — истёкшие/отозванные
+                if random.random() < 0.7:
+                    date_from = today - timedelta(days=random.randint(1, 90))
+                    date_to = today + timedelta(days=random.randint(30, 365))
+                    status = 'действует'
+                else:
+                    date_from = today - timedelta(days=random.randint(200, 700))
+                    date_to = date_from + timedelta(days=random.randint(30, 180))
+                    status = random.choice(['истекло', 'отозвано'])
+
+                obj = (f"компания:{cid}" if random.random() < 0.5
+                       else f"вакансия:{random.randint(1, 100000)}")
 
                 get_id(cur, """
-                    INSERT INTO recruiter_authority (recruiter_id, object, role, date_from, date_to, status)
+                    INSERT INTO recruiter_authority
+                        (recruiter_id, object, role, date_from, date_to, status)
                     VALUES (%s, %s, %s, %s, %s, %s) RETURNING authority_id
-                """, (
-                    rid,
-                    fake.word(),
-                    fake.job(),
-                    date_from,
-                    date_to,
-                    random.choice(['действует', 'истекло', 'отозвано'])
-                ))
+                """, (rid, obj, fake.job(), date_from, date_to, status))
 
         # ================= 5. ТАРИФЫ =================
         print("💳 Создаем тарифы для компаний...")
-        for company_id in company_ids:
-            num_tariffs = random.randint(1, 4)
-            for _ in range(num_tariffs):
+        for cid in company_ids:
+            for _ in range(random.randint(1, 4)):
                 date_from = fake.date_object()
-
                 get_id(cur, """
-                    INSERT INTO employer_tariff (company_id, name, rate, unit, date_from, date_to, status)
+                    INSERT INTO employer_tariff
+                        (company_id, name, rate, unit, date_from, date_to, status)
                     VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING tariff_id
                 """, (
-                    company_id,
+                    cid,
                     f"Тариф {fake.word()}",
                     round(random.uniform(1000, 100000), 2),
                     random.choice(["в месяц", "за вакансию", "за отклик"]),
@@ -135,7 +172,6 @@ def seed_database():
         # ================= 6. НАВЫКИ =================
         print(f"🎯 Создаем {NUM_SKILLS} навыков...")
         skill_ids = []
-
         for _ in range(NUM_SKILLS):
             sid = get_id(cur, """
                 INSERT INTO skill (name, category, description)
@@ -151,27 +187,32 @@ def seed_database():
         # ================= 7. ВАКАНСИИ И ВЕРСИИ =================
         print(f"💼 Создаем {NUM_VACANCIES} вакансий...")
         vacancy_version_ids = []
+        # Для каждого отклика нам нужно знать компанию вакансии (для переговорной)
+        vacancy_version_company = {}  # vacancy_version_id -> company_id
 
         for _ in range(NUM_VACANCIES):
+            cid = random.choice(company_ids)
+            did = random.choice([d for d in department_ids if department_company[d] == cid]
+                                or department_ids)
+
             vid = get_id(cur, """
-                INSERT INTO vacancy (position_name, company_id, department_id, conditions, publish_status)
+                INSERT INTO vacancy
+                    (position_name, company_id, department_id, conditions, publish_status)
                 VALUES (%s, %s, %s, %s, %s) RETURNING vacancy_id
             """, (
                 fake.job(),
-                random.choice(company_ids),
-                random.choice(department_ids),
+                cid,
+                did,
                 fake.text(max_nb_chars=150),
                 random.choice(['активна', 'закрыта'])
             ))
 
-            # Случайное количество версий для каждой вакансии
             num_versions = random.randint(MIN_VERSIONS, MAX_VERSIONS)
-
             for version_num in range(1, num_versions + 1):
                 status = 'текущая' if version_num == num_versions else 'устаревшая'
-
                 vvid = get_id(cur, """
-                    INSERT INTO vacancy_version (vacancy_id, version_number, changed_by, change_reason, status)
+                    INSERT INTO vacancy_version
+                        (vacancy_id, version_number, changed_by, change_reason, status)
                     VALUES (%s, %s, %s, %s, %s) RETURNING vacancy_version_id
                 """, (
                     vid,
@@ -186,14 +227,12 @@ def seed_database():
                     ]),
                     status
                 ))
+                vacancy_version_company[vvid] = cid
 
-                # Добавляем случайное количество требований навыков
-                num_skills = random.randint(2, min(6, len(skill_ids)))
-                required_skills = random.sample(skill_ids, k=num_skills)
-
-                for sid in required_skills:
+                for sid in random.sample(skill_ids, k=random.randint(2, 6)):
                     cur.execute("""
-                        INSERT INTO vacancy_skill_requirement (vacancy_version_id, skill_id, required_level, is_mandatory, comment)
+                        INSERT INTO vacancy_skill_requirement
+                            (vacancy_version_id, skill_id, required_level, is_mandatory, comment)
                         VALUES (%s, %s, %s, %s, %s)
                     """, (
                         vvid,
@@ -208,7 +247,6 @@ def seed_database():
         # ================= 8. СОИСКАТЕЛИ =================
         print(f"👤 Создаем {NUM_APPLICANTS} соискателей...")
         applicant_ids = []
-
         for _ in range(NUM_APPLICANTS):
             aid = get_id(cur, """
                 INSERT INTO applicant (full_name, contacts, status)
@@ -222,13 +260,11 @@ def seed_database():
 
         # ================= 9. РЕЗЮМЕ И ВЕРСИИ =================
         print("📄 Создаем резюме для соискателей...")
-        resume_version_ids = []
+        resume_version_ids = []  # (resume_version_id, applicant_id)
+        applicant_resume_versions = {aid: [] for aid in applicant_ids}
 
         for aid in applicant_ids:
-            # Каждый соискатель имеет 1-3 резюме
-            num_resumes = random.randint(1, 3)
-
-            for _ in range(num_resumes):
+            for _ in range(random.randint(1, 3)):
                 rid = get_id(cur, """
                     INSERT INTO resume (applicant_id, name, desired_position, status)
                     VALUES (%s, %s, %s, %s) RETURNING resume_id
@@ -239,14 +275,12 @@ def seed_database():
                     random.choice(['опубликовано', 'скрыто'])
                 ))
 
-                # Случайное количество версий для каждого резюме
                 num_versions = random.randint(MIN_VERSIONS, MAX_VERSIONS)
-
                 for version_num in range(1, num_versions + 1):
                     status = 'текущая' if version_num == num_versions else 'устаревшая'
-
                     rvid = get_id(cur, """
-                        INSERT INTO resume_version (resume_id, version_number, changed_by, change_reason, status)
+                        INSERT INTO resume_version
+                            (resume_id, version_number, changed_by, change_reason, status)
                         VALUES (%s, %s, %s, %s, %s) RETURNING resume_version_id
                     """, (
                         rid,
@@ -262,13 +296,10 @@ def seed_database():
                         status
                     ))
 
-                    # Добавляем случайное количество навыков
-                    num_skills = random.randint(3, min(8, len(skill_ids)))
-                    resume_skills = random.sample(skill_ids, k=num_skills)
-
-                    for sid in resume_skills:
+                    for sid in random.sample(skill_ids, k=random.randint(3, 8)):
                         cur.execute("""
-                            INSERT INTO resume_skill (resume_version_id, skill_id, level, experience, comment)
+                            INSERT INTO resume_skill
+                                (resume_version_id, skill_id, level, experience, comment)
                             VALUES (%s, %s, %s, %s, %s)
                         """, (
                             rvid,
@@ -279,23 +310,34 @@ def seed_database():
                         ))
 
                     resume_version_ids.append((rvid, aid))
+                    applicant_resume_versions[aid].append(rvid)
 
         # ================= 10. ОТКЛИКИ =================
         print(f"📨 Создаем {NUM_RESPONSES} откликов...")
-        response_ids = []
-        STAGES = ['получен', 'просмотрен', 'приглашен', 'интервью',
-                  'тестовое задание', 'отказ', 'предложение']
-
-        # Генерируем даты откликов за последний год
+        response_ids = []  # (response_id, applicant_id, current_stage, vacancy_version_id)
         base_date = datetime.now() - timedelta(days=365)
 
-        for _ in range(NUM_RESPONSES):
-            rvid, aid = random.choice(resume_version_ids)
-            vvid = random.choice(vacancy_version_ids)
-            current_stage = random.choice(STAGES)
-            status = 'завершён' if current_stage in ['отказ', 'предложение'] else 'активен'
+        # Только текущие версии вакансий — на них можно откликаться
+        cur.execute("SELECT vacancy_version_id FROM vacancy_version WHERE status = 'текущая'")
+        current_vacancy_versions = [r[0] for r in cur.fetchall()]
 
-            # Случайная дата отклика за последний год
+        # Множество для контроля дубликатов (applicant_id, vacancy_version_id)
+        seen_pairs = set()
+
+        attempts = 0
+        while len(response_ids) < NUM_RESPONSES and attempts < NUM_RESPONSES * 5:
+            attempts += 1
+            vvid = random.choice(current_vacancy_versions)
+            rvid, aid = random.choice(resume_version_ids)
+
+            if (aid, vvid) in seen_pairs:
+                continue
+            seen_pairs.add((aid, vvid))
+
+            # Выбираем этап и строим цепочку от 'получен' до него
+            final_stage = random.choice(STAGES)
+            status = 'завершён' if final_stage in ('отказ', 'предложение') else 'активен'
+
             created_at = base_date + timedelta(
                 days=random.randint(0, 365),
                 hours=random.randint(0, 23),
@@ -303,69 +345,116 @@ def seed_database():
             )
 
             resp_id = get_id(cur, """
-                INSERT INTO response (applicant_id, resume_version_id, vacancy_version_id,
-                                     current_stage, status, created_at)
+                INSERT INTO response
+                    (applicant_id, resume_version_id, vacancy_version_id,
+                     current_stage, status, created_at)
                 VALUES (%s, %s, %s, %s, %s, %s) RETURNING response_id
-            """, (aid, rvid, vvid, current_stage, status, created_at))
-            response_ids.append((resp_id, aid, current_stage))
+            """, (aid, rvid, vvid, final_stage, status, created_at))
+
+            response_ids.append((resp_id, aid, final_stage, vvid))
 
         # ================= 11. ЭТАПЫ ОТКЛИКОВ =================
+        # Строим цепочку этапов по TRANSITIONS, чтобы данные были согласованы
         print("📊 Создаем этапы откликов...")
-        for resp_id, aid, current_stage in response_ids:
-            # Получаем дату создания отклика
+
+        def build_stage_chain(final_stage):
+            """Возвращает список этапов от 'получен' до final_stage по допустимым переходам."""
+            if final_stage == 'получен':
+                return ['получен']
+            # BFS по TRANSITIONS от 'получен' до final_stage
+            from collections import deque
+            q = deque([('получен', ['получен'])])
+            visited = {'получен'}
+            while q:
+                node, path = q.popleft()
+                if node == final_stage:
+                    return path
+                for nxt in TRANSITIONS.get(node, []):
+                    if nxt not in visited:
+                        visited.add(nxt)
+                        q.append((nxt, path + [nxt]))
+            return ['получен']
+
+        for resp_id, aid, final_stage, vvid in response_ids:
             cur.execute("SELECT created_at FROM response WHERE response_id = %s", (resp_id,))
-            response_created_at = cur.fetchone()[0]
+            stage_date = cur.fetchone()[0]
 
-            # Создаем 1-5 этапов для каждого отклика
-            num_stages = random.randint(1, 9)
-            stage_date = response_created_at
-
-            for _ in range(num_stages):
-                stage_type = random.choice(STAGES)
+            chain = build_stage_chain(final_stage)
+            for i, stage_type in enumerate(chain):
                 date_from = stage_date + timedelta(hours=random.randint(1, 48))
-                date_to = date_from + timedelta(hours=random.randint(1, 168)) if random.random() < 0.7 else None
+                # Последний этап оставляем открытым, если отклик активен
+                is_last = (i == len(chain) - 1)
+                if is_last and final_stage not in ('отказ', 'предложение'):
+                    date_to = None
+                else:
+                    date_to = date_from + timedelta(hours=random.randint(1, 168))
 
                 cur.execute("""
-                            INSERT INTO response_stage (response_id, recruiter_id, stage_type, date_from, date_to, result)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                            """, (
-                                resp_id,
-                                random.choice(recruiter_ids),
-                                stage_type,
-                                date_from,
-                                date_to,
-                                fake.text(max_nb_chars=80) if random.random() < 0.6 else None
-                            ))
+                    INSERT INTO response_stage
+                        (response_id, recruiter_id, stage_type, date_from, date_to, result)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    resp_id,
+                    random.choice(recruiter_ids),
+                    stage_type,
+                    date_from,
+                    date_to,
+                    fake.text(max_nb_chars=80) if random.random() < 0.6 else None
+                ))
 
                 if date_to:
                     stage_date = date_to
 
         # ================= 12. ИНТЕРВЬЮ =================
-        print("🎤 Создаем интервью...")
+        # Учитываем триггеры пересечений: используем SAVEPOINT и пропускаем конфликты.
+        print("🎤 Создаем интервью (с учётом триггеров пересечений)...")
         interview_ids = []
+        skipped = 0
 
-        # Создаем интервью для 40% откликов
-        for resp_id, aid, current_stage in response_ids:
-            if random.random() < 0.4:
-                start_time = fake.date_time_between(start_date='-1M', end_date='+1M')
-                end_time = start_time + timedelta(hours=random.randint(1, 3))
+        for resp_id, aid, final_stage, vvid in response_ids:
+            if random.random() >= 0.4:
+                continue
+
+            # Разносим интервью по времени, чтобы снизить число конфликтов
+            start_time = fake.date_time_between(start_date='-1M', end_date='+1M')
+            end_time = start_time + timedelta(hours=random.randint(1, 3))
+
+            fmt = random.choice(['Онлайн', 'Офлайн', 'Телефон'])
+            # Переговорная нужна только для офлайн-интервью
+            room_id = None
+            if fmt == 'Офлайн':
+                cid = vacancy_version_company.get(vvid)
+                if cid and company_rooms.get(cid):
+                    room_id = random.choice(company_rooms[cid])
+
+            status = random.choice(INTERVIEW_STATUSES)
+
+            try:
+                cur.execute("SAVEPOINT before_interview")
 
                 iid = get_id(cur, """
-                    INSERT INTO interview (response_id, applicant_id, start_at, end_at, format, result, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING interview_id
+                    INSERT INTO interview
+                        (response_id, applicant_id, start_at, end_at,
+                         format, result, status, room_id)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING interview_id
                 """, (
                     resp_id,
                     aid,
                     start_time,
                     end_time,
-                    random.choice(['Онлайн', 'Офлайн', 'Телефон']),
+                    fmt,
                     fake.text(max_nb_chars=100) if random.random() < 0.7 else None,
-                    random.choice(['запланировано', 'завершено', 'отменено'])
+                    status,
+                    room_id
                 ))
 
-                # Добавляем 1-4 участников
-                num_participants = random.randint(1, min(4, len(recruiter_ids)))
-                participants = random.sample(recruiter_ids, k=num_participants)
+                # Участники: 1-4 рекрутера из той же компании, что и вакансия
+                cid = vacancy_version_company.get(vvid)
+                candidates = [r for r in recruiter_ids if recruiter_company[r] == cid]
+                if not candidates:
+                    candidates = recruiter_ids
+                participants = random.sample(candidates, k=min(random.randint(1, 4), len(candidates)))
 
                 for rec_id in participants:
                     cur.execute("""
@@ -373,17 +462,27 @@ def seed_database():
                         VALUES (%s, %s)
                     """, (iid, rec_id))
 
+                cur.execute("RELEASE SAVEPOINT before_interview")
                 interview_ids.append(iid)
+
+            except errors.ExclusionViolation:
+                # Конфликт расписания — откатываем только эту вставку
+                cur.execute("ROLLBACK TO SAVEPOINT before_interview")
+                skipped += 1
+            except psycopg2.Error:
+                cur.execute("ROLLBACK TO SAVEPOINT before_interview")
+                skipped += 1
+
+        print(f"   ↳ создано интервью: {len(interview_ids)}, пропущено из-за конфликтов: {skipped}")
 
         # ================= 13. ПРЕДЛОЖЕНИЯ О РАБОТЕ =================
         print("💼 Создаем предложения о работе...")
-        for resp_id, aid, current_stage in response_ids:
-            # Создаем предложение для 20% откликов
+        for resp_id, aid, final_stage, vvid in response_ids:
             if random.random() < 0.2:
                 offer_date = fake.date_object()
-
                 get_id(cur, """
-                    INSERT INTO job_offer (response_id, offer_date, position, conditions, response_deadline, status)
+                    INSERT INTO job_offer
+                        (response_id, offer_date, position, conditions, response_deadline, status)
                     VALUES (%s, %s, %s, %s, %s, %s) RETURNING offer_id
                 """, (
                     resp_id,
@@ -391,13 +490,15 @@ def seed_database():
                     fake.job(),
                     fake.text(max_nb_chars=150),
                     offer_date + timedelta(days=random.randint(3, 14)),
-                    random.choice(['отправлено', 'принято', 'отклонено', 'истекло', 'отозвано', 'устаревшее'])
+                    random.choice(['отправлено', 'принято', 'отклонено',
+                                   'истекло', 'отозвано', 'устаревшее'])
                 ))
 
         conn.commit()
         print("\n✅ База данных успешно заполнена!")
         print(f"📊 Статистика:")
         print(f"   • Компаний: {len(company_ids)}")
+        print(f"   • Переговорных: {sum(len(v) for v in company_rooms.values())}")
         print(f"   • Подразделений: {len(department_ids)}")
         print(f"   • Рекрутеров: {len(recruiter_ids)}")
         print(f"   • Навыков: {len(skill_ids)}")
@@ -414,8 +515,9 @@ if __name__ == "__main__":
         seed_database()
     except psycopg2.Error as e:
         print(f"\n❌ Ошибка базы данных: {e}")
+        print(f"   SQLSTATE: {getattr(e, 'pgcode', None)}")
+        print(f"   Детали: {getattr(e, 'pgerror', None)}")
     except Exception as e:
         print(f"\n❌ Произошла ошибка: {e}")
         import traceback
-
         traceback.print_exc()
